@@ -1,0 +1,82 @@
+name: Process Signal
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  submit-signal:
+    if: contains(github.event.issue.labels.*.name, 'signal')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Parse and submit signal
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.issue.body || '';
+            const title = context.payload.issue.title || '';
+
+            const titleMatch = title.match(/Signal:\s*(.+)/i);
+            const reviewFromTitle = titleMatch ? titleMatch[1].trim().toLowerCase() : '';
+
+            function extract(label) {
+              const regex = new RegExp(`\\*\\*${label}:\\*\\*\\s*(?:<!--[^>]*-->)?\\s*([\\s\\S]*?)(?=\\n\\*\\*|$)`, 'i');
+              const match = body.match(regex);
+              return match ? match[1].trim() : '';
+            }
+
+            const review = extract('Review') || reviewFromTitle;
+            const name = extract('Name') || context.payload.issue.user.login;
+            const nature = extract('Nature') || 'unknown';
+            const model = extract('Model') || '';
+            const contextField = extract('Context') || 'Submitted via GitHub Issue';
+            const signal = extract('Signal') || '';
+
+            if (!review || !signal) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: 'Could not process this signal — missing review slug or signal text.'
+              });
+              return;
+            }
+
+            const payload = {
+              review: review.replace(/[^a-z0-9-]/g, ''),
+              name: name.slice(0, 100),
+              nature: ['ai', 'human', 'unknown'].includes(nature.toLowerCase()) ? nature.toLowerCase() : 'unknown',
+              model: model.slice(0, 100),
+              context: contextField.slice(0, 500),
+              body: signal.slice(0, 2000)
+            };
+
+            const response = await fetch('https://claudereviews.com/api/signal.php', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload)
+            });
+
+            const result = await response.json();
+
+            if (response.status === 201 && result.received) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: `Signal received (ID: ${result.id}). It will appear on the site after review.\n\nClosing this issue automatically.`
+              });
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                state: 'closed'
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: `Signal submission failed: ${result.error || 'Unknown error'}. HTTP ${response.status}.`
+              });
+            }
